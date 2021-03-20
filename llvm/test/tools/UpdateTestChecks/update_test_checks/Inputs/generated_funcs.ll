@@ -2,7 +2,9 @@
 target datalayout = "e-m:o-i64:64-f80:128-n8:16:32:64-S128"
 target triple = "x86_64-apple-macosx10.14.0"
 
-define void @foo(i32) "hot-cold-split" {
+@G = external dso_local global i32, align 4
+
+define void @foo(i32) {
   %2 = icmp eq i32 %0, 0
   tail call void @_Z10sideeffectv()
   br i1 %2, label %sink, label %exit
@@ -16,7 +18,7 @@ exit:
   ret void
 }
 
-define void @bar(i32) "hot-cold-split" {
+define void @bar(i32) {
   %2 = icmp eq i32 %0, 0
   tail call void @_Z10sideeffectv()
   br i1 %2, label %sink, label %exit

@@ -2229,6 +2229,12 @@ static TryCastResult TryReinterpretCast(Sema &Self, ExprResult &SrcExpr,
   bool destIsVector = DestType->isVectorType();
   bool srcIsVector = SrcType->isVectorType();
   if (srcIsVector || destIsVector) {
+    // Allow bitcasting between SVE VLATs and VLSTs, and vice-versa.
+    if (Self.isValidSveBitcast(SrcType, DestType)) {
+      Kind = CK_BitCast;
+      return TC_Success;
+    }
+
     // The non-vector type, if any, must have integral type.  This is
     // the same rule that C vector casts use; note, however, that enum
     // types are not integral in C++.
@@ -2762,6 +2768,13 @@ void CastOperation::CheckCStyleCast() {
     return;
   }
 
+  // Allow bitcasting between compatible SVE vector types.
+  if ((SrcType->isVectorType() || DestType->isVectorType()) &&
+      Self.isValidSveBitcast(SrcType, DestType)) {
+    Kind = CK_BitCast;
+    return;
+  }
+
   if (!DestType->isScalarType() && !DestType->isVectorType()) {
     const RecordType *DestRecordTy = DestType->getAs<RecordType>();
 
@@ -2913,8 +2926,8 @@ void CastOperation::CheckCStyleCast() {
     }
   }
 
-  if (Self.getLangOpts().OpenCL &&
-      !Self.getOpenCLOptions().isEnabled("cl_khr_fp16")) {
+  if (Self.getLangOpts().OpenCL && !Self.getOpenCLOptions().isAvailableOption(
+                                       "cl_khr_fp16", Self.getLangOpts())) {
     if (DestType->isHalfType()) {
       Self.Diag(SrcExpr.get()->getBeginLoc(), diag::err_opencl_cast_to_half)
           << DestType << SrcExpr.get()->getSourceRange();

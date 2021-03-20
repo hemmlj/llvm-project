@@ -16,6 +16,7 @@
 
 #include "AArch64.h"
 #include "llvm/CodeGen/CallingConvLower.h"
+#include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/SelectionDAG.h"
 #include "llvm/CodeGen/TargetLowering.h"
 #include "llvm/IR/CallingConv.h"
@@ -56,6 +57,10 @@ enum NodeType : unsigned {
   // AUTH_TC_RETURN chain, callee, fpdiff, auth key #, discriminator, operands.
   AUTH_TC_RETURN,
 
+  // Pseudo for a OBJC call that gets emitted together with a special `mov
+  // x29, x29` marker instruction.
+  CALL_RVMARKER,
+
   // Produces the full sequence of instructions for getting the thread pointer
   // offset of a variable into X0, using the TLSDesc model.
   TLSDESC_CALLSEQ,
@@ -85,6 +90,8 @@ enum NodeType : unsigned {
   FMA_PRED,
   FMAXNM_PRED,
   FMINNM_PRED,
+  FMAX_PRED,
+  FMIN_PRED,
   FMUL_PRED,
   FSUB_PRED,
   MUL_PRED,
@@ -120,6 +127,8 @@ enum NodeType : unsigned {
   FCVTZS_MERGE_PASSTHRU,
   SIGN_EXTEND_INREG_MERGE_PASSTHRU,
   ZERO_EXTEND_INREG_MERGE_PASSTHRU,
+  ABS_MERGE_PASSTHRU,
+  NEG_MERGE_PASSTHRU,
 
   SETCC_MERGE_ZERO,
 
@@ -235,6 +244,10 @@ enum NodeType : unsigned {
   UABD,
   SABD,
 
+  // udot/sdot instructions
+  UDOT,
+  SDOT,
+
   // Vector across-lanes min/max
   // Only the lower result lane is defined.
   SMINV,
@@ -251,9 +264,6 @@ enum NodeType : unsigned {
   ORV_PRED,
   EORV_PRED,
   ANDV_PRED,
-
-  // Vector bitwise negation
-  NOT,
 
   // Vector bitwise insertion
   BIT,
@@ -281,6 +291,8 @@ enum NodeType : unsigned {
   /// mode without emitting such REV instructions.
   NVCAST,
 
+  MRS, // MRS, also sets the flags via a glue.
+
   SMULL,
   UMULL,
 
@@ -299,7 +311,6 @@ enum NodeType : unsigned {
   CLASTB_N,
   LASTA,
   LASTB,
-  REV,
   TBL,
 
   // Floating-point reductions.
@@ -314,9 +325,14 @@ enum NodeType : unsigned {
   PTEST,
   PTRUE,
 
+  BITREVERSE_MERGE_PASSTHRU,
+  BSWAP_MERGE_PASSTHRU,
+  CTLZ_MERGE_PASSTHRU,
+  CTPOP_MERGE_PASSTHRU,
   DUP_MERGE_PASSTHRU,
   INDEX_VECTOR,
 
+  // Cast between vectors of the same element type but differ in length.
   REINTERPRET_CAST,
 
   LD1_MERGE_ZERO,
@@ -426,7 +442,7 @@ enum NodeType : unsigned {
 
   LDP,
   STP,
-  STNP
+  STNP,
 };
 
 } // end namespace AArch64ISD
@@ -447,6 +463,21 @@ static inline bool isDef32(const SDNode &N) {
 }
 
 } // end anonymous namespace
+
+namespace AArch64 {
+/// Possible values of current rounding mode, which is specified in bits
+/// 23:22 of FPCR.
+enum Rounding {
+  RN = 0,    // Round to Nearest
+  RP = 1,    // Round towards Plus infinity
+  RM = 2,    // Round towards Minus infinity
+  RZ = 3,    // Round towards Zero
+  rmMask = 3 // Bit mask selecting rounding mode
+};
+
+// Bit position of rounding mode bits in FPCR.
+const unsigned RoundingBitsPos = 22;
+} // namespace AArch64
 
 class AArch64Subtarget;
 class AArch64TargetMachine;
@@ -486,7 +517,7 @@ public:
   /// Returns true if the target allows unaligned memory accesses of the
   /// specified type.
   bool allowsMisalignedMemoryAccesses(
-      EVT VT, unsigned AddrSpace = 0, unsigned Align = 1,
+      EVT VT, unsigned AddrSpace = 0, Align Alignment = Align(1),
       MachineMemOperand::Flags Flags = MachineMemOperand::MONone,
       bool *Fast = nullptr) const override;
   /// LLT variant.
@@ -593,6 +624,9 @@ public:
   bool isFMAFasterThanFMulAndFAdd(const MachineFunction &MF,
                                   EVT VT) const override;
   bool isFMAFasterThanFMulAndFAdd(const Function &F, Type *Ty) const override;
+
+  bool generateFMAsInMachineCombiner(EVT VT,
+                                     CodeGenOpt::Level OptLevel) const override;
 
   const MCPhysReg *getScratchRegisters(CallingConv::ID CC) const override;
 
@@ -786,8 +820,13 @@ public:
   /// illegal as the original, thus leading to an infinite legalisation loop.
   /// NOTE: Once BUILD_VECTOR is legal or can be custom lowered for all legal
   /// vector types this override can be removed.
-  bool mergeStoresAfterLegalization(EVT VT) const override {
-    return !useSVEForFixedLengthVectors();
+  bool mergeStoresAfterLegalization(EVT VT) const override;
+
+  // If the platform/function should have a redzone, return the size in bytes.
+  unsigned getRedZoneSize(const Function &F) const {
+    if (F.hasFnAttribute(Attribute::NoRedZone))
+      return 0;
+    return 128;
   }
 
 private:
@@ -819,6 +858,10 @@ private:
                           SDValue ThisVal) const;
 
   SDValue LowerSTORE(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerABS(SDValue Op, SelectionDAG &DAG) const;
+
+  SDValue LowerMGATHER(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerMSCATTER(SDValue Op, SelectionDAG &DAG) const;
 
   SDValue LowerINTRINSIC_WO_CHAIN(SDValue Op, SelectionDAG &DAG) const;
 
@@ -902,6 +945,7 @@ private:
   SDValue LowerSPONENTRY(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerRETURNADDR(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerFLT_ROUNDS_(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerSET_ROUNDING(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerINSERT_VECTOR_ELT(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerEXTRACT_VECTOR_ELT(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerSCALAR_TO_VECTOR(SDValue Op, SelectionDAG &DAG) const;
@@ -921,8 +965,7 @@ private:
   SDValue LowerShiftRightParts(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerVSETCC(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerCTPOP(SDValue Op, SelectionDAG &DAG) const;
-  SDValue LowerF128Call(SDValue Op, SelectionDAG &DAG,
-                        RTLIB::Libcall Call) const;
+  SDValue LowerCTTZ(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerFCOPYSIGN(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerFP_EXTEND(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerFP_ROUND(SDValue Op, SelectionDAG &DAG) const;
@@ -951,8 +994,10 @@ private:
   SDValue LowerFixedLengthVectorIntExtendToSVE(SDValue Op,
                                                SelectionDAG &DAG) const;
   SDValue LowerFixedLengthVectorLoadToSVE(SDValue Op, SelectionDAG &DAG) const;
-  SDValue LowerFixedLengthReductionToSVE(unsigned Opcode, SDValue ScalarOp,
-                                         SelectionDAG &DAG) const;
+  SDValue LowerVECREDUCE_SEQ_FADD(SDValue ScalarOp, SelectionDAG &DAG) const;
+  SDValue LowerPredReductionToSVE(SDValue ScalarOp, SelectionDAG &DAG) const;
+  SDValue LowerReductionToSVE(unsigned Opcode, SDValue ScalarOp,
+                              SelectionDAG &DAG) const;
   SDValue LowerFixedLengthVectorSelectToSVE(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerFixedLengthVectorSetccToSVE(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerFixedLengthVectorStoreToSVE(SDValue Op, SelectionDAG &DAG) const;
@@ -966,6 +1011,10 @@ private:
                           bool Reciprocal) const override;
   SDValue getRecipEstimate(SDValue Operand, SelectionDAG &DAG, int Enabled,
                            int &ExtraSteps) const override;
+  SDValue getSqrtInputTest(SDValue Operand, SelectionDAG &DAG,
+                           const DenormalMode &Mode) const override;
+  SDValue getSqrtResultForDenormInput(SDValue Operand,
+                                      SelectionDAG &DAG) const override;
   unsigned combineRepeatedFPDivisors() const override;
 
   ConstraintType getConstraintType(StringRef Constraint) const override;
@@ -997,6 +1046,8 @@ private:
     return TargetLowering::getInlineAsmMemConstraint(ConstraintCode);
   }
 
+  bool shouldExtendGSIndex(EVT VT, EVT &EltTy) const override;
+  bool shouldRemoveExtendFromGSIndex(EVT VT) const override;
   bool isVectorLoadExtDesirable(SDValue ExtVal) const override;
   bool isUsedByReturnOnly(SDNode *N, SDValue &Chain) const override;
   bool mayBeEmittedAsTailCall(const CallInst *CI) const override;
@@ -1023,11 +1074,21 @@ private:
   bool shouldLocalize(const MachineInstr &MI,
                       const TargetTransformInfo *TTI) const override;
 
-  bool useSVEForFixedLengthVectors() const;
   // Normally SVE is only used for byte size vectors that do not fit within a
   // NEON vector. This changes when OverrideNEON is true, allowing SVE to be
   // used for 64bit and 128bit vectors as well.
   bool useSVEForFixedLengthVectorVT(EVT VT, bool OverrideNEON = false) const;
+
+  // With the exception of data-predicate transitions, no instructions are
+  // required to cast between legal scalable vector types. However:
+  //  1. Packed and unpacked types have different bit lengths, meaning BITCAST
+  //     is not universally useable.
+  //  2. Most unpacked integer types are not legal and thus integer extends
+  //     cannot be used to convert between unpacked and packed types.
+  // These can make "bitcasting" a multiphase process. REINTERPRET_CAST is used
+  // to transition between unpacked and packed types of the same element type,
+  // with BITCAST used otherwise.
+  SDValue getSVESafeBitCast(EVT VT, SDValue Op, SelectionDAG &DAG) const;
 };
 
 namespace AArch64 {

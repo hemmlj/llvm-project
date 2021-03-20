@@ -12,6 +12,9 @@
 //
 //===----------------------------------------------------------------------===//
 
+#ifndef LLVM_CODEGEN_COMMANDFLAGS_H
+#define LLVM_CODEGEN_COMMANDFLAGS_H
+
 #include "llvm/ADT/FloatingPointMode.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/Triple.h"
@@ -75,6 +78,8 @@ bool getDontPlaceZerosInBSS();
 
 bool getEnableGuaranteedTailCallOpt();
 
+bool getEnableAIXExtendedAltivecABI();
+
 bool getDisableTailCalls();
 
 bool getStackSymbolOrdering();
@@ -97,7 +102,13 @@ Optional<bool> getExplicitFunctionSections();
 
 bool getIgnoreXCOFFVisibility();
 
+bool getXCOFFTracebackTable();
+
 std::string getBBSections();
+
+std::string getStackProtectorGuard();
+unsigned getStackProtectorGuardOffset();
+std::string getStackProtectorGuardReg();
 
 unsigned getTLSSize();
 
@@ -121,6 +132,8 @@ bool getEnableMachineFunctionSplitter();
 
 bool getEnableDebugEntryValues();
 
+bool getPseudoProbeForProfiling();
+
 bool getValueTrackingVariableLocations();
 
 bool getForceDwarfFrameSection();
@@ -134,6 +147,9 @@ struct RegisterCodeGenFlags {
 };
 
 llvm::BasicBlockSection getBBSectionsMode(llvm::TargetOptions &Options);
+
+llvm::StackProtectorGuards
+getStackProtectorGuardMode(llvm::TargetOptions &Options);
 
 /// Common utility function tightly tied to the options listed here. Initializes
 /// a TargetOptions object with CodeGen flags and returns it.
@@ -160,3 +176,5 @@ void setFunctionAttributes(StringRef CPU, StringRef Features, Function &F);
 void setFunctionAttributes(StringRef CPU, StringRef Features, Module &M);
 } // namespace codegen
 } // namespace llvm
+
+#endif // LLVM_CODEGEN_COMMANDFLAGS_H

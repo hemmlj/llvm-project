@@ -19,6 +19,9 @@ def err_fe_inline_asm : Error<"%0">, CatInlineAsm;
 def warn_fe_inline_asm : Warning<"%0">, CatInlineAsm, InGroup<BackendInlineAsm>;
 def note_fe_inline_asm : Note<"%0">, CatInlineAsm;
 def note_fe_inline_asm_here : Note<"instantiated into assembly here">;
+def err_fe_source_mgr : Error<"%0">, CatSourceMgr;
+def warn_fe_source_mgr : Warning<"%0">, CatSourceMgr, InGroup<BackendSourceMgr>;
+def note_fe_source_mgr : Note<"%0">, CatSourceMgr;
 def err_fe_cannot_link_module : Error<"cannot link module '%0': %1">,
   DefaultFatal;
 
@@ -108,10 +111,8 @@ def err_fe_action_not_available : Error<
     "action %0 not compiled in">;
 def err_fe_invalid_alignment : Error<
     "invalid value '%1' in '%0'; alignment must be a power of 2">;
-def err_fe_invalid_wchar_type
-    : Error<"invalid wchar_t type '%0'; must be one of 'char', 'short', 'int'">;
 def err_fe_invalid_exception_model
-   : Error<"invalid exception model '%0' for target '%1'">;
+   : Error<"invalid exception model '%select{none|dwarf|sjlj|arm|seh|wasm|aix}0' for target '%1'">;
 def warn_fe_concepts_ts_flag : Warning<
   "-fconcepts-ts is deprecated - use '-std=c++20' for Concepts support">,
   InGroup<Deprecated>;
@@ -290,10 +291,6 @@ def warn_alias_with_section : Warning<
   "as the %select{aliasee|resolver}2">,
   InGroup<IgnoredAttributes>;
 
-def warn_fe_ignored_opt_split_cold_code : Warning<
-  "'%0' has no effect when %select{optimizing for minimum size|optimizations are disabled}1">,
-  InGroup<IgnoredAttributes>;
-
 let CategoryName = "Instrumentation Issue" in {
 def warn_profile_data_out_of_date : Warning<
   "profile data may be out of date: of %0 function%s0, %1 %plural{1:has|:have}1"
@@ -307,12 +304,6 @@ def warn_profile_data_missing : Warning<
 def warn_profile_data_unprofiled : Warning<
   "no profile data available for file \"%0\"">,
   InGroup<ProfileInstrUnprofiled>;
-def warn_profile_data_misexpect : Warning<
-  "Potential performance regression from use of __builtin_expect(): "
-  "Annotation was correct on %0 of profiled executions.">,
-  BackendInfo,
-  InGroup<MisExpect>,
-  DefaultIgnore;
 } // end of instrumentation issue category
 
 }

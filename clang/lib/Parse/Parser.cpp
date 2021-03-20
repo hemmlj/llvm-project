@@ -49,10 +49,10 @@ IdentifierInfo *Parser::getSEHExceptKeyword() {
 }
 
 Parser::Parser(Preprocessor &pp, Sema &actions, bool skipFunctionBodies)
-  : PP(pp), Actions(actions), Diags(PP.getDiagnostics()),
-    GreaterThanIsOperator(true), ColonIsSacred(false),
-    InMessageExpression(false), TemplateParameterDepth(0),
-    ParsingInObjCContainer(false) {
+    : PP(pp), PreferredType(pp.isCodeCompletionEnabled()), Actions(actions),
+      Diags(PP.getDiagnostics()), GreaterThanIsOperator(true),
+      ColonIsSacred(false), InMessageExpression(false),
+      TemplateParameterDepth(0), ParsingInObjCContainer(false) {
   SkipFunctionBodies = pp.isCodeCompletionEnabled() || skipFunctionBodies;
   Tok.startToken();
   Tok.setKind(tok::eof);
@@ -878,6 +878,7 @@ Parser::ParseExternalDeclaration(ParsedAttributesWithRange &attrs,
     SingleDecl = ParseObjCMethodDefinition();
     break;
   case tok::code_completion:
+    cutOffParsing();
     if (CurParsedObjCImpl) {
       // Code-complete Objective-C methods even without leading '-'/'+' prefix.
       Actions.CodeCompleteObjCMethodDecl(getCurScope(),
@@ -887,7 +888,6 @@ Parser::ParseExternalDeclaration(ParsedAttributesWithRange &attrs,
     Actions.CodeCompleteOrdinaryName(
         getCurScope(),
         CurParsedObjCImpl ? Sema::PCC_ObjCImplementation : Sema::PCC_Namespace);
-    cutOffParsing();
     return nullptr;
   case tok::kw_import:
     SingleDecl = ParseModuleImport(SourceLocation());
@@ -909,7 +909,7 @@ Parser::ParseExternalDeclaration(ParsedAttributesWithRange &attrs,
     // A function definition cannot start with any of these keywords.
     {
       SourceLocation DeclEnd;
-      return ParseDeclaration(DeclaratorContext::FileContext, DeclEnd, attrs);
+      return ParseDeclaration(DeclaratorContext::File, DeclEnd, attrs);
     }
 
   case tok::kw_static:
@@ -919,7 +919,7 @@ Parser::ParseExternalDeclaration(ParsedAttributesWithRange &attrs,
       Diag(ConsumeToken(), diag::warn_static_inline_explicit_inst_ignored)
         << 0;
       SourceLocation DeclEnd;
-      return ParseDeclaration(DeclaratorContext::FileContext, DeclEnd, attrs);
+      return ParseDeclaration(DeclaratorContext::File, DeclEnd, attrs);
     }
     goto dont_know;
 
@@ -930,7 +930,7 @@ Parser::ParseExternalDeclaration(ParsedAttributesWithRange &attrs,
       // Inline namespaces. Allowed as an extension even in C++03.
       if (NextKind == tok::kw_namespace) {
         SourceLocation DeclEnd;
-        return ParseDeclaration(DeclaratorContext::FileContext, DeclEnd, attrs);
+        return ParseDeclaration(DeclaratorContext::File, DeclEnd, attrs);
       }
 
       // Parse (then ignore) 'inline' prior to a template instantiation. This is
@@ -939,7 +939,7 @@ Parser::ParseExternalDeclaration(ParsedAttributesWithRange &attrs,
         Diag(ConsumeToken(), diag::warn_static_inline_explicit_inst_ignored)
           << 1;
         SourceLocation DeclEnd;
-        return ParseDeclaration(DeclaratorContext::FileContext, DeclEnd, attrs);
+        return ParseDeclaration(DeclaratorContext::File, DeclEnd, attrs);
       }
     }
     goto dont_know;
@@ -953,9 +953,8 @@ Parser::ParseExternalDeclaration(ParsedAttributesWithRange &attrs,
              diag::warn_cxx98_compat_extern_template :
              diag::ext_extern_template) << SourceRange(ExternLoc, TemplateLoc);
       SourceLocation DeclEnd;
-      return Actions.ConvertDeclToDeclGroup(
-          ParseExplicitInstantiation(DeclaratorContext::FileContext, ExternLoc,
-                                     TemplateLoc, DeclEnd, attrs));
+      return Actions.ConvertDeclToDeclGroup(ParseExplicitInstantiation(
+          DeclaratorContext::File, ExternLoc, TemplateLoc, DeclEnd, attrs));
     }
     goto dont_know;
 
@@ -1136,11 +1135,11 @@ Parser::ParseDeclOrFunctionDefInternal(ParsedAttributesWithRange &attrs,
   if (getLangOpts().CPlusPlus && isTokenStringLiteral() &&
       DS.getStorageClassSpec() == DeclSpec::SCS_extern &&
       DS.getParsedSpecifiers() == DeclSpec::PQ_StorageClassSpecifier) {
-    Decl *TheDecl = ParseLinkage(DS, DeclaratorContext::FileContext);
+    Decl *TheDecl = ParseLinkage(DS, DeclaratorContext::File);
     return Actions.ConvertDeclToDeclGroup(TheDecl);
   }
 
-  return ParseDeclGroup(DS, DeclaratorContext::FileContext);
+  return ParseDeclGroup(DS, DeclaratorContext::File);
 }
 
 Parser::DeclGroupPtrTy
@@ -1237,7 +1236,7 @@ Decl *Parser::ParseFunctionDefinition(ParsingDeclarator &D,
                                    Scope::CompoundStmtScope);
     Scope *ParentScope = getCurScope()->getParent();
 
-    D.setFunctionDefinitionKind(FDK_Definition);
+    D.setFunctionDefinitionKind(FunctionDefinitionKind::Definition);
     Decl *DP = Actions.HandleDeclarator(ParentScope, D,
                                         TemplateParameterLists);
     D.complete(DP);
@@ -1268,7 +1267,7 @@ Decl *Parser::ParseFunctionDefinition(ParsingDeclarator &D,
                                    Scope::CompoundStmtScope);
     Scope *ParentScope = getCurScope()->getParent();
 
-    D.setFunctionDefinitionKind(FDK_Definition);
+    D.setFunctionDefinitionKind(FunctionDefinitionKind::Definition);
     Decl *FuncDecl = Actions.HandleDeclarator(ParentScope, D,
                                               MultiTemplateParamsArg());
     D.complete(FuncDecl);
@@ -1449,7 +1448,7 @@ void Parser::ParseKNRParamDeclarations(Declarator &D) {
     }
 
     // Parse the first declarator attached to this declspec.
-    Declarator ParmDeclarator(DS, DeclaratorContext::KNRTypeListContext);
+    Declarator ParmDeclarator(DS, DeclaratorContext::KNRTypeList);
     ParseDeclarator(ParmDeclarator);
 
     // Handle the full declarator list.
@@ -2123,21 +2122,21 @@ SourceLocation Parser::handleUnexpectedCodeCompletionToken() {
 
   for (Scope *S = getCurScope(); S; S = S->getParent()) {
     if (S->getFlags() & Scope::FnScope) {
+      cutOffParsing();
       Actions.CodeCompleteOrdinaryName(getCurScope(),
                                        Sema::PCC_RecoveryInFunction);
-      cutOffParsing();
       return PrevTokLocation;
     }
 
     if (S->getFlags() & Scope::ClassScope) {
-      Actions.CodeCompleteOrdinaryName(getCurScope(), Sema::PCC_Class);
       cutOffParsing();
+      Actions.CodeCompleteOrdinaryName(getCurScope(), Sema::PCC_Class);
       return PrevTokLocation;
     }
   }
 
-  Actions.CodeCompleteOrdinaryName(getCurScope(), Sema::PCC_Namespace);
   cutOffParsing();
+  Actions.CodeCompleteOrdinaryName(getCurScope(), Sema::PCC_Namespace);
   return PrevTokLocation;
 }
 
@@ -2461,8 +2460,8 @@ bool Parser::ParseModuleName(
   while (true) {
     if (!Tok.is(tok::identifier)) {
       if (Tok.is(tok::code_completion)) {
-        Actions.CodeCompleteModuleImport(UseLoc, Path);
         cutOffParsing();
+        Actions.CodeCompleteModuleImport(UseLoc, Path);
         return true;
       }
 

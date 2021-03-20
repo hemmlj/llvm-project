@@ -532,10 +532,7 @@ unsigned AArch64FastISel::fastMaterializeConstant(const Constant *C) {
   MVT VT = CEVT.getSimpleVT();
   // arm64_32 has 32-bit pointers held in 64-bit registers. Because of that,
   // 'null' pointers need to have a somewhat special treatment.
-  if (const auto *CPN = dyn_cast<ConstantPointerNull>(C)) {
-    (void)CPN;
-    assert(CPN->getType()->getPointerAddressSpace() == 0 &&
-           "Unexpected address space");
+  if (isa<ConstantPointerNull>(C)) {
     assert(VT == MVT::i64 && "Expected 64-bit pointers");
     return materializeInt(ConstantInt::get(Type::getInt64Ty(*Context), 0), VT);
   }
@@ -2975,6 +2972,7 @@ bool AArch64FastISel::fastLowerArguments() {
         Arg.hasAttribute(Attribute::InReg) ||
         Arg.hasAttribute(Attribute::StructRet) ||
         Arg.hasAttribute(Attribute::SwiftSelf) ||
+        Arg.hasAttribute(Attribute::SwiftAsync) ||
         Arg.hasAttribute(Attribute::SwiftError) ||
         Arg.hasAttribute(Attribute::Nest))
       return false;
@@ -3233,7 +3231,7 @@ bool AArch64FastISel::fastLowerCall(CallLoweringInfo &CLI) {
 
   for (auto Flag : CLI.OutFlags)
     if (Flag.isInReg() || Flag.isSRet() || Flag.isNest() || Flag.isByVal() ||
-        Flag.isSwiftSelf() || Flag.isSwiftError())
+        Flag.isSwiftSelf() || Flag.isSwiftAsync() || Flag.isSwiftError())
       return false;
 
   // Set up the argument vectors.
@@ -3900,7 +3898,7 @@ bool AArch64FastISel::selectRet(const Instruction *I) {
       return false;
 
     // Vectors (of > 1 lane) in big endian need tricky handling.
-    if (RVEVT.isVector() && RVEVT.getVectorNumElements() > 1 &&
+    if (RVEVT.isVector() && RVEVT.getVectorElementCount().isVector() &&
         !Subtarget->isLittleEndian())
       return false;
 

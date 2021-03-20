@@ -2193,8 +2193,8 @@ void BasicBugReport::Profile(llvm::FoldingSetNodeID& hash) const {
   for (SourceRange range : Ranges) {
     if (!range.isValid())
       continue;
-    hash.AddInteger(range.getBegin().getRawEncoding());
-    hash.AddInteger(range.getEnd().getRawEncoding());
+    hash.Add(range.getBegin());
+    hash.Add(range.getEnd());
   }
 }
 
@@ -2216,8 +2216,8 @@ void PathSensitiveBugReport::Profile(llvm::FoldingSetNodeID &hash) const {
   for (SourceRange range : Ranges) {
     if (!range.isValid())
       continue;
-    hash.AddInteger(range.getBegin().getRawEncoding());
-    hash.AddInteger(range.getEnd().getRawEncoding());
+    hash.Add(range.getBegin());
+    hash.Add(range.getEnd());
   }
 }
 
@@ -2738,8 +2738,8 @@ static void CompactMacroExpandedPieces(PathPieces &path,
 }
 
 /// Generate notes from all visitors.
-/// Notes associated with {@code ErrorNode} are generated using
-/// {@code getEndPath}, and the rest are generated with {@code VisitNode}.
+/// Notes associated with @c ErrorNode are generated using
+/// @c getEndPath, and the rest are generated with @c VisitNode.
 static std::unique_ptr<VisitorsDiagnosticsTy>
 generateVisitorsDiagnostics(PathSensitiveBugReport *R,
                             const ExplodedNode *ErrorNode,
@@ -2749,7 +2749,7 @@ generateVisitorsDiagnostics(PathSensitiveBugReport *R,
   PathSensitiveBugReport::VisitorList visitors;
 
   // Run visitors on all nodes starting from the node *before* the last one.
-  // The last node is reserved for notes generated with {@code getEndPath}.
+  // The last node is reserved for notes generated with @c getEndPath.
   const ExplodedNode *NextNode = ErrorNode->getFirstPred();
   while (NextNode) {
 

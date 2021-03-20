@@ -341,8 +341,8 @@ unsigned SystemZTTIImpl::getMinPrefetchStride(unsigned NumMemAccesses,
 
   // Emit prefetch instructions for smaller strides in cases where we think
   // the hardware prefetcher might not be able to keep up.
-  if (NumStridedMemAccesses > 32 &&
-      NumStridedMemAccesses == NumMemAccesses && !HasCall)
+  if (NumStridedMemAccesses > 32 && !HasCall &&
+      (NumMemAccesses - NumStridedMemAccesses) * 32 <= NumStridedMemAccesses)
     return 1;
 
   return ST->hasMiscellaneousExtensions3() ? 8192 : 2048;
@@ -487,8 +487,10 @@ int SystemZTTIImpl::getArithmeticInstrCost(
 
     if (DivRemConstPow2)
       return (NumVectors * (SignedDivRem ? SDivPow2Cost : 1));
-    if (DivRemConst)
-      return VF * DivMulSeqCost + getScalarizationOverhead(VTy, Args);
+    if (DivRemConst) {
+      SmallVector<Type *> Tys(Args.size(), Ty);
+      return VF * DivMulSeqCost + getScalarizationOverhead(VTy, Args, Tys);
+    }
     if ((SignedDivRem || UnsignedDivRem) && VF > 4)
       // Temporary hack: disable high vectorization factors with integer
       // division/remainder, which will get scalarized and handled with
@@ -511,7 +513,9 @@ int SystemZTTIImpl::getArithmeticInstrCost(
         // inserting and extracting the values.
         unsigned ScalarCost =
             getArithmeticInstrCost(Opcode, Ty->getScalarType(), CostKind);
-        unsigned Cost = (VF * ScalarCost) + getScalarizationOverhead(VTy, Args);
+        SmallVector<Type *> Tys(Args.size(), Ty);
+        unsigned Cost =
+            (VF * ScalarCost) + getScalarizationOverhead(VTy, Args, Tys);
         // FIXME: VF 2 for these FP operations are currently just as
         // expensive as for VF 4.
         if (VF == 2)
@@ -528,7 +532,9 @@ int SystemZTTIImpl::getArithmeticInstrCost(
 
     // There is no native support for FRem.
     if (Opcode == Instruction::FRem) {
-      unsigned Cost = (VF * LIBCALL_COST) + getScalarizationOverhead(VTy, Args);
+      SmallVector<Type *> Tys(Args.size(), Ty);
+      unsigned Cost =
+          (VF * LIBCALL_COST) + getScalarizationOverhead(VTy, Args, Tys);
       // FIXME: VF 2 for float is currently just as expensive as for VF 4.
       if (VF == 2 && ScalarBits == 32)
         Cost *= 2;
@@ -542,7 +548,8 @@ int SystemZTTIImpl::getArithmeticInstrCost(
 }
 
 int SystemZTTIImpl::getShuffleCost(TTI::ShuffleKind Kind, VectorType *Tp,
-                                   int Index, VectorType *SubTp) {
+                                   ArrayRef<int> Mask, int Index,
+                                   VectorType *SubTp) {
   if (ST->hasVector()) {
     unsigned NumVectors = getNumVectorRegs(Tp);
 
@@ -575,7 +582,7 @@ int SystemZTTIImpl::getShuffleCost(TTI::ShuffleKind Kind, VectorType *Tp,
     }
   }
 
-  return BaseT::getShuffleCost(Kind, Tp, Index, SubTp);
+  return BaseT::getShuffleCost(Kind, Tp, Mask, Index, SubTp);
 }
 
 // Return the log2 difference of the element sizes of the two vector types.
@@ -847,11 +854,11 @@ static unsigned getOperandsExtensionCost(const Instruction *I) {
 }
 
 int SystemZTTIImpl::getCmpSelInstrCost(unsigned Opcode, Type *ValTy,
-                                       Type *CondTy,
+                                       Type *CondTy, CmpInst::Predicate VecPred,
                                        TTI::TargetCostKind CostKind,
                                        const Instruction *I) {
   if (CostKind != TTI::TCK_RecipThroughput)
-    return BaseT::getCmpSelInstrCost(Opcode, ValTy, CondTy, CostKind);
+    return BaseT::getCmpSelInstrCost(Opcode, ValTy, CondTy, VecPred, CostKind);
 
   if (!ValTy->isVectorTy()) {
     switch (Opcode) {
@@ -927,7 +934,7 @@ int SystemZTTIImpl::getCmpSelInstrCost(unsigned Opcode, Type *ValTy,
     }
   }
 
-  return BaseT::getCmpSelInstrCost(Opcode, ValTy, CondTy, CostKind);
+  return BaseT::getCmpSelInstrCost(Opcode, ValTy, CondTy, VecPred, CostKind);
 }
 
 int SystemZTTIImpl::

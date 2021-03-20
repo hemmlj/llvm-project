@@ -639,7 +639,9 @@ void IndexRecordActionBase::finish(CompilerInstance &CI) {
     return;
   }
 
-  std::string OutputFile = CI.getFrontendOpts().OutputFile;
+  std::string OutputFile = CI.getFrontendOpts().IndexUnitOutputPath;
+  if (OutputFile.empty())
+    OutputFile = CI.getFrontendOpts().OutputFile;
   if (OutputFile.empty()) {
     OutputFile = std::string(CI.getFrontendOpts().Inputs[0].getFile());
     OutputFile += ".o";
@@ -778,7 +780,7 @@ public:
         ModFile, RecordOpts.RecordSystemDependencies,
         /*Complain=*/false,
         [&](const serialization::InputFile &IF, bool isSystem) {
-          auto *FE = IF.getFile();
+          auto FE = IF.getFile();
           if (!FE)
             return;
           // Ignore module map files, they are not as important to track as

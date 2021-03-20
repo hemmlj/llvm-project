@@ -342,6 +342,10 @@ Optional<MCFixupKind> AArch64AsmBackend::getFixupKind(StringRef Name) const {
 #define ELF_RELOC(X, Y)  .Case(#X, Y)
 #include "llvm/BinaryFormat/ELFRelocs/AArch64.def"
 #undef ELF_RELOC
+                      .Case("BFD_RELOC_NONE", ELF::R_AARCH64_NONE)
+                      .Case("BFD_RELOC_16", ELF::R_AARCH64_ABS16)
+                      .Case("BFD_RELOC_32", ELF::R_AARCH64_ABS32)
+                      .Case("BFD_RELOC_64", ELF::R_AARCH64_ABS64)
                       .Default(-1u);
   if (Type == -1u)
     return None;
@@ -579,6 +583,7 @@ public:
     unsigned StackSize = 0;
 
     uint32_t CompactUnwindEncoding = 0;
+    int CurOffset = 0;
     for (size_t i = 0, e = Instrs.size(); i != e; ++i) {
       const MCCFIInstruction &Inst = Instrs[i];
 
@@ -608,6 +613,9 @@ public:
         assert(FPPush.getOperation() == MCCFIInstruction::OpOffset &&
                "Frame pointer not pushed!");
 
+        assert(FPPush.getOffset() + 8 == LRPush.getOffset());
+        CurOffset = FPPush.getOffset();
+
         unsigned LRReg = *MRI.getLLVMRegNum(LRPush.getRegister(), true);
         unsigned FPReg = *MRI.getLLVMRegNum(FPPush.getRegister(), true);
 
@@ -634,10 +642,18 @@ public:
         if (i + 1 == e)
           return CU::UNWIND_ARM64_MODE_DWARF;
 
+        if (CurOffset != 0 && Inst.getOffset() != CurOffset - 8)
+          return CU::UNWIND_ARM64_MODE_DWARF;
+        CurOffset = Inst.getOffset();
+
         const MCCFIInstruction &Inst2 = Instrs[++i];
         if (Inst2.getOperation() != MCCFIInstruction::OpOffset)
           return CU::UNWIND_ARM64_MODE_DWARF;
         unsigned Reg2 = *MRI.getLLVMRegNum(Inst2.getRegister(), true);
+
+        if (Inst2.getOffset() != CurOffset - 8)
+          return CU::UNWIND_ARM64_MODE_DWARF;
+        CurOffset = Inst2.getOffset();
 
         // N.B. The encodings must be in register number order, and the X
         // registers before the D registers.
@@ -758,7 +774,7 @@ MCAsmBackend *llvm::createAArch64leAsmBackend(const Target &T,
   assert(TheTriple.isOSBinFormatELF() && "Invalid target");
 
   uint8_t OSABI = MCELFObjectTargetWriter::getOSABI(TheTriple.getOS());
-  bool IsILP32 = Options.getABIName() == "ilp32";
+  bool IsILP32 = STI.getTargetTriple().getEnvironment() == Triple::GNUILP32;
   return new ELFAArch64AsmBackend(T, TheTriple, OSABI, /*IsLittleEndian=*/true,
                                   IsILP32);
 }
@@ -771,7 +787,7 @@ MCAsmBackend *llvm::createAArch64beAsmBackend(const Target &T,
   assert(TheTriple.isOSBinFormatELF() &&
          "Big endian is only supported for ELF targets!");
   uint8_t OSABI = MCELFObjectTargetWriter::getOSABI(TheTriple.getOS());
-  bool IsILP32 = Options.getABIName() == "ilp32";
+  bool IsILP32 = STI.getTargetTriple().getEnvironment() == Triple::GNUILP32;
   return new ELFAArch64AsmBackend(T, TheTriple, OSABI, /*IsLittleEndian=*/false,
                                   IsILP32);
 }

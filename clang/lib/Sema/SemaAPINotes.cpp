@@ -322,7 +322,7 @@ static void ProcessAPINotes(Sema &S, Decl *D,
                                   nullptr, SourceLocation(), nullptr, nullptr,
                                   nullptr, ParsedAttr::AS_GNU);
 
-      if (!S.DiagnoseSwiftName(D, info.SwiftName, D->getLocation(), *SNA)) {
+      if (!S.DiagnoseSwiftName(D, info.SwiftName, D->getLocation(), *SNA, /*IsAsync=*/false)) {
         return nullptr;
       }
 
@@ -677,7 +677,7 @@ static void ProcessAPINotes(Sema &S, TypedefNameDecl *D,
                             const api_notes::TypedefInfo &info,
                             VersionedInfoMetadata metadata) {
   // swift_wrapper
-  using SwiftWrapperKind = api_notes::SwiftWrapperKind;
+  using SwiftWrapperKind = api_notes::SwiftNewTypeKind;
 
   if (auto swiftWrapper = info.SwiftWrapper) {
     handleAPINotedAttribute<SwiftNewTypeAttr>(S, D,

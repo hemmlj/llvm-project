@@ -922,10 +922,9 @@ Instruction *InstCombinerImpl::visitShl(BinaryOperator &I) {
       return BinaryOperator::CreateAnd(X, ConstantInt::get(Ty, Mask));
     }
 
-    // FIXME: we do not yet transform non-exact shr's. The backend (DAGCombine)
-    // needs a few fixes for the rotate pattern recognition first.
     const APInt *ShOp1;
-    if (match(Op0, m_Exact(m_Shr(m_Value(X), m_APInt(ShOp1))))) {
+    if (match(Op0, m_Exact(m_Shr(m_Value(X), m_APInt(ShOp1)))) &&
+        ShOp1->ult(BitWidth)) {
       unsigned ShrAmt = ShOp1->getZExtValue();
       if (ShrAmt < ShAmt) {
         // If C1 < C2: (X >>?,exact C1) << C2 --> X << (C2 - C1)
@@ -945,7 +944,33 @@ Instruction *InstCombinerImpl::visitShl(BinaryOperator &I) {
       }
     }
 
-    if (match(Op0, m_Shl(m_Value(X), m_APInt(ShOp1)))) {
+    if (match(Op0, m_OneUse(m_Shr(m_Value(X), m_APInt(ShOp1)))) &&
+        ShOp1->ult(BitWidth)) {
+      unsigned ShrAmt = ShOp1->getZExtValue();
+      if (ShrAmt < ShAmt) {
+        // If C1 < C2: (X >>? C1) << C2 --> X << (C2 - C1) & (-1 << C2)
+        Constant *ShiftDiff = ConstantInt::get(Ty, ShAmt - ShrAmt);
+        auto *NewShl = BinaryOperator::CreateShl(X, ShiftDiff);
+        NewShl->setHasNoUnsignedWrap(I.hasNoUnsignedWrap());
+        NewShl->setHasNoSignedWrap(I.hasNoSignedWrap());
+        Builder.Insert(NewShl);
+        APInt Mask(APInt::getHighBitsSet(BitWidth, BitWidth - ShAmt));
+        return BinaryOperator::CreateAnd(NewShl, ConstantInt::get(Ty, Mask));
+      }
+      if (ShrAmt > ShAmt) {
+        // If C1 > C2: (X >>? C1) << C2 --> X >>? (C1 - C2) & (-1 << C2)
+        Constant *ShiftDiff = ConstantInt::get(Ty, ShrAmt - ShAmt);
+        auto *OldShr = cast<BinaryOperator>(Op0);
+        auto *NewShr =
+            BinaryOperator::Create(OldShr->getOpcode(), X, ShiftDiff);
+        NewShr->setIsExact(OldShr->isExact());
+        Builder.Insert(NewShr);
+        APInt Mask(APInt::getHighBitsSet(BitWidth, BitWidth - ShAmt));
+        return BinaryOperator::CreateAnd(NewShr, ConstantInt::get(Ty, Mask));
+      }
+    }
+
+    if (match(Op0, m_Shl(m_Value(X), m_APInt(ShOp1))) && ShOp1->ult(BitWidth)) {
       unsigned AmtSum = ShAmt + ShOp1->getZExtValue();
       // Oversized shifts are simplified to zero in InstSimplify.
       if (AmtSum < BitWidth)
@@ -1106,6 +1131,12 @@ Instruction *InstCombinerImpl::visitLShr(BinaryOperator &I) {
       }
     }
 
+    // lshr i32 (X -nsw Y), 31 --> zext (X < Y)
+    Value *Y;
+    if (ShAmt == BitWidth - 1 &&
+        match(Op0, m_OneUse(m_NSWSub(m_Value(X), m_Value(Y)))))
+      return new ZExtInst(Builder.CreateICmpSLT(X, Y), Ty);
+
     if (match(Op0, m_LShr(m_Value(X), m_APInt(ShOp1)))) {
       unsigned AmtSum = ShAmt + ShOp1->getZExtValue();
       // Oversized shifts are simplified to zero in InstSimplify.
@@ -1113,6 +1144,16 @@ Instruction *InstCombinerImpl::visitLShr(BinaryOperator &I) {
         // (X >>u C1) >>u C2 --> X >>u (C1 + C2)
         return BinaryOperator::CreateLShr(X, ConstantInt::get(Ty, AmtSum));
     }
+
+    // Look for a "splat" mul pattern - it replicates bits across each half of
+    // a value, so a right shift is just a mask of the low bits:
+    // lshr i32 (mul nuw X, Pow2+1), 16 --> and X, Pow2-1
+    // TODO: Generalize to allow more than just half-width shifts?
+    const APInt *MulC;
+    if (match(Op0, m_NUWMul(m_Value(X), m_APInt(MulC))) &&
+        ShAmt * 2 == BitWidth && (*MulC - 1).isPowerOf2() &&
+        MulC->logBase2() == ShAmt)
+      return BinaryOperator::CreateAnd(X, ConstantInt::get(Ty, *MulC - 2));
 
     // If the shifted-out value is known-zero, then this is an exact shift.
     if (!I.isExact() &&
@@ -1268,6 +1309,12 @@ Instruction *InstCombinerImpl::visitAShr(BinaryOperator &I) {
       return new SExtInst(NewSh, Ty);
     }
 
+    // ashr i32 (X -nsw Y), 31 --> sext (X < Y)
+    Value *Y;
+    if (ShAmt == BitWidth - 1 &&
+        match(Op0, m_OneUse(m_NSWSub(m_Value(X), m_Value(Y)))))
+      return new SExtInst(Builder.CreateICmpSLT(X, Y), Ty);
+
     // If the shifted-out value is known-zero, then this is an exact shift.
     if (!I.isExact() &&
         MaskedValueIsZero(Op0, APInt::getLowBitsSet(BitWidth, ShAmt), 0, &I)) {
@@ -1282,6 +1329,15 @@ Instruction *InstCombinerImpl::visitAShr(BinaryOperator &I) {
   // See if we can turn a signed shr into an unsigned shr.
   if (MaskedValueIsZero(Op0, APInt::getSignMask(BitWidth), 0, &I))
     return BinaryOperator::CreateLShr(Op0, Op1);
+
+  // ashr (xor %x, -1), %y  -->  xor (ashr %x, %y), -1
+  Value *X;
+  if (match(Op0, m_OneUse(m_Not(m_Value(X))))) {
+    // Note that we must drop 'exact'-ness of the shift!
+    // Note that we can't keep undef's in -1 vector constant!
+    auto *NewAShr = Builder.CreateAShr(X, Op1, Op0->getName() + ".not");
+    return BinaryOperator::CreateNot(NewAShr);
+  }
 
   return nullptr;
 }
